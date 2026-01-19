@@ -230,7 +230,11 @@ const app = {
     },
 
     renderHeatmap() {
-        if (!this.gradient) return;
+        // Validation: Ensure gradient is ready
+        if (!this.gradient || this.gradient.length === 0) {
+            this.createGradient();
+            if (!this.gradient) return;
+        }
 
         const width = this.canvas.width;
         const height = this.canvas.height;
@@ -242,10 +246,10 @@ const app = {
 
         let activeTouches = 0;
 
-        // 1. Draw Intensity Map (Alpha)
-        // Use WHITE circles (255,255,255) to build intensity.
-        // If the color mapping fails, users will see white spots instead of black shadows,
-        // which prevents the "black box" issue from obscuring the image.
+        // 1. Draw Intensity Map
+        // Use BLUE circles as base. 
+        // If color mapping fails, users see blue spots (Cold), which is acceptable.
+        // If it works, they get the full spectrum.
         this.touches.forEach(touch => {
             let age = now - touch.timestamp;
             if (age < 0) age = 0;
@@ -253,15 +257,16 @@ const app = {
 
             activeTouches++;
 
-            const life = 1 - (age / this.FADE_DURATION);
+            const life = 1 - (age / this.FADE_DURATION); // 1.0 -> 0.0
             const x = touch.x * width;
             const y = touch.y * height;
             const radius = 35;
-            const alpha = 0.25 * life;
+            const alpha = 0.3 * life; // Slight boost to visibility
 
             const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
-            gradient.addColorStop(0, `rgba(255,255,255,${alpha})`);
-            gradient.addColorStop(1, 'rgba(255,255,255,0)');
+            // Base color: Blue
+            gradient.addColorStop(0, `rgba(0,0,255,${alpha})`);
+            gradient.addColorStop(1, 'rgba(0,0,255,0)');
 
             ctx.fillStyle = gradient;
             ctx.beginPath();
@@ -277,23 +282,30 @@ const app = {
         const gradientByt = this.gradient;
 
         for (let i = 0; i < data.length; i += 4) {
-            const alpha = data[i + 3];
-            if (alpha > 0) {
-                let heatIndex = alpha * 3;
+            const currentAlpha = data[i + 3];
+            // Check if there is content (Base is Blue: 0, 0, 255, alpha)
+            if (currentAlpha > 5) { // Use threshold > 5 to avoid noise
+
+                // Map intensity (currentAlpha) to Gradient
+                // currentAlpha is effectively our "Heat Value" (0-255).
+                // We want to amplify it.
+                // Max alpha we drew is ~0.3 * 255 = 76.
+                // We want 76 to map to ~1.0 on gradient (Red).
+                // So multiply by ~3.5.
+
+                let heatIndex = currentAlpha * 4;
                 if (heatIndex > 255) heatIndex = 255;
 
                 const gIdx = Math.floor(heatIndex) * 4;
 
-                data[i] = gradientByt[gIdx];
-                data[i + 1] = gradientByt[gIdx + 1];
-                data[i + 2] = gradientByt[gIdx + 2];
-                // Keep the alpha from the heatmap (don't force opaque)
-                // But boost it a bit for visibility?
-                // Let's settle on: keep alpha 220ish constant where there is any heat?
-                // Or just use the heatmap alpha?
-                // The user complained about transparency not being "visible enough".
-                // Let's set a floor for visibility.
-                data[i + 3] = Math.max(alpha, 150);
+                // Replace pixel with Gradient Color
+                data[i] = gradientByt[gIdx];     // R
+                data[i + 1] = gradientByt[gIdx + 1]; // G
+                data[i + 2] = gradientByt[gIdx + 2]; // B
+
+                // Fix Alpha: Make it solid enough to see colors
+                // But fade edges. 
+                data[i + 3] = Math.min(255, currentAlpha * 2 + 50);
             }
         }
 
