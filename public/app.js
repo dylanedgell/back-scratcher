@@ -3,14 +3,21 @@ const app = {
     sessionId: null,
     canvas: document.getElementById('scratch-canvas'),
     ctx: document.getElementById('scratch-canvas').getContext('2d'),
+    // Off-screen canvas for calculating intensity (alpha)
+    heatCanvas: document.createElement('canvas'),
+    heatCtx: null, // Initialized in init
+
     touches: [],
+    palette: null,
 
     // Config
     FADE_DURATION: 10000,
     isCreator: false,
 
     init() {
-        // Simple init without palette generation
+        this.heatCtx = this.heatCanvas.getContext('2d', { willReadFrequently: true });
+        this.palette = this.generateGradientPalette();
+
         const urlParams = new URLSearchParams(window.location.search);
         this.sessionId = urlParams.get('session');
 
@@ -38,6 +45,29 @@ const app = {
             this.resizeCanvas();
             this.renderHeatmap();
         });
+    },
+
+    generateGradientPalette() {
+        // Create a 256x1 gradient canvas to pick colors from
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 1;
+        const ctx = canvas.getContext('2d');
+
+        const gradient = ctx.createLinearGradient(0, 0, 256, 0);
+        // Rainbow Heatmap Gradient: Blue -> Green -> Yellow -> Red
+        gradient.addColorStop(0.0, 'rgba(0, 0, 255, 0)'); // Fully transparent at bottom
+        gradient.addColorStop(0.1, '#0000ff'); // Blue
+        gradient.addColorStop(0.3, '#00ffff'); // Cyan
+        gradient.addColorStop(0.5, '#00ff00'); // Green
+        gradient.addColorStop(0.7, '#ffff00'); // Yellow
+        gradient.addColorStop(1.0, '#ff0000'); // Red
+
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 256, 1);
+
+        // Get the pixel data
+        return ctx.getImageData(0, 0, 256, 1).data;
     },
 
     updateRoleUI() {
@@ -107,6 +137,10 @@ const app = {
         }
 
         this.canvas.addEventListener('pointerdown', (e) => this.handlePointer(e));
+        // Add move event for dragging support
+        this.canvas.addEventListener('pointermove', (e) => {
+            if (e.buttons > 0) this.handlePointer(e);
+        });
     },
 
     handlePointer(e) {
@@ -182,8 +216,15 @@ const app = {
         const wrapper = document.querySelector('.canvas-wrapper');
         if (wrapper) {
             const rect = wrapper.getBoundingClientRect();
+
+            // Resize visible canvas
             this.canvas.width = rect.width;
             this.canvas.height = rect.height;
+
+            // Resize off-screen heat canvas to match
+            this.heatCanvas.width = rect.width;
+            this.heatCanvas.height = rect.height;
+
             this.renderHeatmap();
         }
     },
@@ -192,41 +233,89 @@ const app = {
         const width = this.canvas.width;
         const height = this.canvas.height;
         const ctx = this.ctx;
+        const heatCtx = this.heatCtx;
         const now = Date.now();
 
-        // Clear canvas
-        ctx.clearRect(0, 0, width, height);
+        if (width === 0 || height === 0) return;
 
-        // Use standard Additive Blending for a "Glowing" effect
-        // This is extremely safe and supported by all browsers.
-        // It creates a "Red Hot" look where spots overlap.
-        ctx.globalCompositeOperation = 'lighter';
+        // 1. Clear both canvases
+        ctx.clearRect(0, 0, width, height);
+        heatCtx.clearRect(0, 0, width, height);
+
+        // 2. Draw black spots with varying alpha onto the off-screen heatCanvas
+        // The more overlaps, the higher the alpha accumulates.
+        // We use 'source-over' but we are drawing with low opacity black. 
+        // Better yet, just use normal blending. The alpha will increase as we stack.
+        // HOWEVER, 'lighter' (additive) is better for intensity accumulation if we use grayscale values.
+        // Let's use 'lighter' with very low intensity white/grayscale pixels, then read the brightness.
+        // Actually, easiest mapping is: Alpha channel accumulation.
+
+        heatCtx.globalCompositeOperation = 'source-over';
+        // Resetting to default for new frame, but we want accumulation...
+        // Let's use simple alpha blending.
 
         this.touches.forEach(touch => {
             let age = now - touch.timestamp;
             if (age < 0) age = 0;
-            if (age > this.FADE_DURATION) return;
+            if (age > this.FADE_DURATION) return; // Skip old touches
 
             const life = 1 - (age / this.FADE_DURATION);
             const x = touch.x * width;
             const y = touch.y * height;
-            const radius = 40;
+            const radius = 50; // Bigger radius for smoother heatmap
 
-            const alpha = 0.6 * life;
+            // Intensity based on life. 
+            // We want overlapping to increase intensity.
+            // Using a radial gradient with low alpha.
+            const gradient = heatCtx.createRadialGradient(x, y, 0, x, y, radius);
 
-            const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
-            // Red Center
-            gradient.addColorStop(0, `rgba(255, 50, 50, ${alpha})`);
-            // Transparent Edge
-            gradient.addColorStop(1, 'rgba(255, 50, 50, 0)');
+            // We draw BLACK with alpha. The alpha channel is all we care about.
+            // Actually, if we just draw standard semi-transparent circles, standard alpha blending applies.
+            // A better way for "heat" is often additive blending of values.
+            // Let's try standard alpha blending first. 
+            // Center is more opaque (higher intensity).
 
-            ctx.fillStyle = gradient;
-            ctx.beginPath();
-            ctx.arc(x, y, radius, 0, Math.PI * 2);
-            ctx.fill();
+            const intensity = 0.15 * life; // Max intensity per spot
+
+            gradient.addColorStop(0, `rgba(0, 0, 0, ${intensity})`);
+            gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+            heatCtx.fillStyle = gradient;
+            heatCtx.beginPath();
+            heatCtx.arc(x, y, radius, 0, Math.PI * 2);
+            heatCtx.fill();
         });
 
-        ctx.globalCompositeOperation = 'source-over';
+        // 3. Map the off-screen alpha values to the palette
+        // This is safe because heatCanvas has no external images drawn on it.
+        const imageData = heatCtx.getImageData(0, 0, width, height);
+        const data = imageData.data; // R, G, B, A array
+        const palette = this.palette;
+
+        // Create new image data for the visible canvas
+        const outputData = ctx.createImageData(width, height);
+        const out = outputData.data;
+
+        for (let i = 0; i < data.length; i += 4) {
+            const alpha = data[i + 3]; // Get the accumulated alpha
+
+            if (alpha > 0) {
+                // Map alpha (0-255) to palette index
+                // Palette is 256 pixels wide (1024 bytes: R,G,B,A)
+                const offset = alpha * 4;
+
+                out[i] = palette[offset];     // R
+                out[i + 1] = palette[offset + 1]; // G
+                out[i + 2] = palette[offset + 2]; // B
+                out[i + 3] = palette[offset + 3]; // A (from palette, usually 255 unless low end of gradient)
+
+                // Optional: Preserve some transparency for very low values if palette alpha is 0 at index 0
+                // Our palette has alpha 0 at index 0, effectively handling the background.
+            }
+        }
+
+        // 4. Put the colorized pixels onto the visible canvas
+        ctx.putImageData(outputData, 0, 0);
     }
 };
 
