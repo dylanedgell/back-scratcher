@@ -6,12 +6,10 @@ const app = {
     touches: [], // Array<{x, y, timestamp}>
 
     // Config
-    gradient: null,
     FADE_DURATION: 10000,
     isCreator: false,
 
     init() {
-        this.createGradient();
         const urlParams = new URLSearchParams(window.location.search);
         this.sessionId = urlParams.get('session');
 
@@ -61,44 +59,6 @@ const app = {
             if (claimBtn) claimBtn.style.display = 'block';
             if (clearBtn) clearBtn.style.display = 'none';
         }
-    },
-
-    createGradient() {
-        // Create gradient manually to ensure consistent colors
-        // Avoids potential issues with hidden canvas elements in some browsers
-        const data = new Uint8ClampedArray(256 * 4);
-        for (let i = 0; i < 256; i++) {
-            const t = i / 255;
-            let r = 0, g = 0, b = 0;
-
-            // Spectrum: Blue (Cold) -> Green -> Yellow -> Red (Hot)
-            if (t < 0.33) {
-                // Blue -> Green
-                const localT = t / 0.33;
-                r = 0;
-                g = Math.floor(255 * localT);
-                b = Math.floor(255 * (1 - localT));
-            } else if (t < 0.66) {
-                // Green -> Yellow (Green + Red)
-                const localT = (t - 0.33) / 0.33;
-                r = Math.floor(255 * localT);
-                g = 255;
-                b = 0;
-            } else {
-                // Yellow -> Red
-                const localT = (t - 0.66) / 0.34;
-                r = 255;
-                g = Math.floor(255 * (1 - localT));
-                b = 0;
-            }
-
-            const idx = i * 4;
-            data[idx] = r;
-            data[idx + 1] = g;
-            data[idx + 2] = b;
-            data[idx + 3] = 255; // Alpha for list, not used directly but good for debug
-        }
-        this.gradient = data;
     },
 
     setupEventListeners() {
@@ -230,12 +190,6 @@ const app = {
     },
 
     renderHeatmap() {
-        // Validation: Ensure gradient is ready
-        if (!this.gradient || this.gradient.length === 0) {
-            this.createGradient();
-            if (!this.gradient) return;
-        }
-
         const width = this.canvas.width;
         const height = this.canvas.height;
         const ctx = this.ctx;
@@ -244,72 +198,31 @@ const app = {
         ctx.clearRect(0, 0, width, height);
         ctx.globalCompositeOperation = 'source-over';
 
-        let activeTouches = 0;
-
-        // 1. Draw Intensity Map
-        // Use BLUE circles as base. 
-        // If color mapping fails, users see blue spots (Cold), which is acceptable.
-        // If it works, they get the full spectrum.
         this.touches.forEach(touch => {
             let age = now - touch.timestamp;
             if (age < 0) age = 0;
             if (age > this.FADE_DURATION) return;
 
-            activeTouches++;
-
-            const life = 1 - (age / this.FADE_DURATION); // 1.0 -> 0.0
+            const life = 1 - (age / this.FADE_DURATION);
             const x = touch.x * width;
             const y = touch.y * height;
             const radius = 35;
-            const alpha = 0.3 * life; // Slight boost to visibility
+
+            // Simple Red Blob Logic
+            // Start at 0.8 opacity and fade to 0
+            const alpha = 0.8 * life;
 
             const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
-            // Base color: Blue
-            gradient.addColorStop(0, `rgba(0,0,255,${alpha})`);
-            gradient.addColorStop(1, 'rgba(0,0,255,0)');
+            // Center: Red
+            gradient.addColorStop(0, `rgba(255, 50, 50, ${alpha})`);
+            // Edge: Transparent
+            gradient.addColorStop(1, 'rgba(255, 50, 50, 0)');
 
             ctx.fillStyle = gradient;
             ctx.beginPath();
             ctx.arc(x, y, radius, 0, Math.PI * 2);
             ctx.fill();
         });
-
-        if (activeTouches === 0) return;
-
-        // 2. Colorize
-        const imageData = ctx.getImageData(0, 0, width, height);
-        const data = imageData.data;
-        const gradientByt = this.gradient;
-
-        for (let i = 0; i < data.length; i += 4) {
-            const currentAlpha = data[i + 3];
-            // Check if there is content (Base is Blue: 0, 0, 255, alpha)
-            if (currentAlpha > 5) { // Use threshold > 5 to avoid noise
-
-                // Map intensity (currentAlpha) to Gradient
-                // currentAlpha is effectively our "Heat Value" (0-255).
-                // We want to amplify it.
-                // Max alpha we drew is ~0.3 * 255 = 76.
-                // We want 76 to map to ~1.0 on gradient (Red).
-                // So multiply by ~3.5.
-
-                let heatIndex = currentAlpha * 4;
-                if (heatIndex > 255) heatIndex = 255;
-
-                const gIdx = Math.floor(heatIndex) * 4;
-
-                // Replace pixel with Gradient Color
-                data[i] = gradientByt[gIdx];     // R
-                data[i + 1] = gradientByt[gIdx + 1]; // G
-                data[i + 2] = gradientByt[gIdx + 2]; // B
-
-                // Fix Alpha: Make it solid enough to see colors
-                // But fade edges. 
-                data[i + 3] = Math.min(255, currentAlpha * 2 + 50);
-            }
-        }
-
-        ctx.putImageData(imageData, 0, 0);
     }
 };
 
