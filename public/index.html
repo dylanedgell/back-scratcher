@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scratchanitch</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="app-container">
+        <header>
+            <h1>Scratchanitch 🖐️</h1>
+            <p class="subtitle">Show them exactly where it itches.</p>
+        </header>
+
+        <main>
+            <!-- Welcome / Create Session View -->
+            <div id="welcome-view" class="view">
+                <button id="create-session-btn" class="btn primary-btn">
+                    Start a Scratch Session
+                </button>
+            </div>
+
+            <!-- Active Session View -->
+            <div id="session-view" class="view hidden">
+                <div class="share-container">
+                    <p>Share this link with your helper:</p>
+                    <div class="link-box">
+                        <input type="text" id="share-link" readonly>
+                        <ul class="actions">
+                            <li><button id="copy-btn" class="icon-btn" aria-label="Copy Link">📋 Copy</button></li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="scratch-interface">
+                    <div class="canvas-wrapper">
+                        <img src="back-image.png" id="back-image" alt="Back Human Anatomy" draggable="false">
+                        <canvas id="scratch-canvas"></canvas>
+                    </div>
+                    <div class="controls">
+                        <div class="status-indicator" id="status-indicator">
+                            <span class="dot"></span> <span id="status-text">Connecting...</span>
+                        </div>
+                        <button id="claim-control-btn" class="btn primary-btn"
+                            style="display:none; padding: 8px 16px; font-size: 0.9rem;">I have the itch! 🙋</button>
+                        <button id="clear-btn" class="btn secondary-btn">Clear Spots</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+
+</html>
