@@ -7,7 +7,7 @@ const app = {
 
     // Config
     gradient: null,
-    FADE_DURATION: 30000,
+    FADE_DURATION: 10000,
     isCreator: false,
 
     init() {
