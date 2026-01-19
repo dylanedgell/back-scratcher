@@ -3,16 +3,25 @@ const app = {
     sessionId: null,
     canvas: document.getElementById('scratch-canvas'),
     ctx: document.getElementById('scratch-canvas').getContext('2d'),
-    // Removed off-screen buffer (not needed for blending)
+
+    // Off-screen buffer for SAFE heat caching (Grayscale intensity)
+    heatCanvas: document.createElement('canvas'),
+    heatCtx: null,
 
     touches: [],
 
     // Config
-    gradient: null,
     FADE_DURATION: 10000,
     isCreator: false,
 
+    // Hardcoded Rainbow Palette (256 colors * 4 bytes)
+    colorPalette: null,
+
     init() {
+        // Initialize off-screen buffer safely
+        this.heatCtx = this.heatCanvas.getContext('2d', { willReadFrequently: true });
+        this.generatePalette();
+
         const urlParams = new URLSearchParams(window.location.search);
         this.sessionId = urlParams.get('session');
 
@@ -62,24 +71,33 @@ const app = {
         }
     },
 
-    createGradient() {
-        // Create the rainbow lookup table (256 colors)
-        const canvas = document.createElement('canvas');
-        canvas.width = 256;
-        canvas.height = 1;
-        const ctx = canvas.getContext('2d');
-        const gradient = ctx.createLinearGradient(0, 0, 256, 1);
+    generatePalette() {
+        // Pre-calculate 256 colors: Blue -> Cyan -> Green -> Yellow -> Red
+        this.colorPalette = new Uint8Array(256 * 4);
+        for (let i = 0; i < 256; i++) {
+            const t = i / 255;
+            let r = 0, g = 0, b = 0;
 
-        // Classic Heatmap: Blue -> Cyan -> Green -> Yellow -> Red
-        gradient.addColorStop(0.0, 'rgba(0,0,255,1)');
-        gradient.addColorStop(0.2, 'rgba(0,255,255,1)');
-        gradient.addColorStop(0.4, 'rgba(0,255,0,1)');
-        gradient.addColorStop(0.6, 'rgba(255,255,0,1)');
-        gradient.addColorStop(1.0, 'rgba(255,0,0,1)');
+            if (t < 0.25) { // Blue -> Cyan
+                const u = t / 0.25;
+                r = 0; g = Math.floor(255 * u); b = 255;
+            } else if (t < 0.5) { // Cyan -> Green
+                const u = (t - 0.25) / 0.25;
+                r = 0; g = 255; b = Math.floor(255 * (1 - u));
+            } else if (t < 0.75) { // Green -> Yellow
+                const u = (t - 0.5) / 0.25;
+                r = Math.floor(255 * u); g = 255; b = 0;
+            } else { // Yellow -> Red
+                const u = (t - 0.75) / 0.25;
+                r = 255; g = Math.floor(255 * (1 - u)); b = 0;
+            }
 
-        ctx.fillStyle = gradient;
-        ctx.fillRect(0, 0, 256, 1);
-        this.gradient = ctx.getImageData(0, 0, 256, 1).data;
+            const idx = i * 4;
+            this.colorPalette[idx] = r;
+            this.colorPalette[idx + 1] = g;
+            this.colorPalette[idx + 2] = b;
+            this.colorPalette[idx + 3] = 255; // Fully opaque color, alpha handled by map
+        }
     },
 
     setupEventListeners() {
@@ -204,8 +222,16 @@ const app = {
         const wrapper = document.querySelector('.canvas-wrapper');
         if (wrapper) {
             const rect = wrapper.getBoundingClientRect();
-            this.canvas.width = rect.width;
-            this.canvas.height = rect.height;
+            // Use Math.floor to strictly integer-align dimensions
+            // Artifacts can happen with fractional widths in getImageData
+            const w = Math.floor(rect.width);
+            const h = Math.floor(rect.height);
+
+            this.canvas.width = w;
+            this.canvas.height = h;
+            this.heatCanvas.width = w;
+            this.heatCanvas.height = h;
+
             this.renderHeatmap();
         }
     },
@@ -213,47 +239,84 @@ const app = {
     renderHeatmap() {
         const width = this.canvas.width;
         const height = this.canvas.height;
-        const ctx = this.ctx;
+        const hCtx = this.heatCtx;
         const now = Date.now();
 
-        ctx.clearRect(0, 0, width, height);
+        // 1. Clear both canvases
+        this.ctx.clearRect(0, 0, width, height);
+        hCtx.clearRect(0, 0, width, height);
 
-        // --- SAFE "GLOWING" HEATMAP METHOD ---
-        // Instead of pixel manipulation (which crashes on some screens),
-        // we use Additive Blending ('lighter'). 
-        // Overlapping spots naturally become brighter/whiter, mimicking heat.
+        let activeTouches = 0;
 
-        ctx.globalCompositeOperation = 'lighter';
+        // 2. Draw Grayscale Intensity to Off-screen Buffer
+        // Stack alpha to build 'heat'
 
         this.touches.forEach(touch => {
             let age = now - touch.timestamp;
             if (age < 0) age = 0;
             if (age > this.FADE_DURATION) return;
 
-            const life = 1 - (age / this.FADE_DURATION);
+            activeTouches++;
+
+            const life = 1 - (age / this.FADE_DURATION); // 1.0 -> 0.0
             const x = touch.x * width;
             const y = touch.y * height;
             const radius = 40;
 
-            // Base Color: Reddish-Orange
-            // As they stack, 'lighter' blend will push them towards Yellow -> White
-            const alpha = 0.5 * life;
+            // Base alpha intensity: 0.15 * life
+            // Overlapping 5-6 clicks gets close to 1.0
+            const alpha = 0.15 * life;
 
-            const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
-            gradient.addColorStop(0, `rgba(255, 100, 50, ${alpha})`);
-            gradient.addColorStop(1, 'rgba(255, 100, 50, 0)');
+            const gradient = hCtx.createRadialGradient(x, y, 0, x, y, radius);
+            gradient.addColorStop(0, `rgba(0,0,0,${alpha})`);
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
 
-            ctx.fillStyle = gradient;
-            ctx.beginPath();
-            ctx.arc(x, y, radius, 0, Math.PI * 2);
-            ctx.fill();
+            hCtx.fillStyle = gradient;
+            hCtx.beginPath();
+            hCtx.arc(x, y, radius, 0, Math.PI * 2);
+            hCtx.fill();
         });
 
-        // Reset composite operation so other drwaings aren't affected
-        ctx.globalCompositeOperation = 'source-over';
+        if (activeTouches === 0) return;
+
+        // 3. Map Intensity (Alpha) to Color
+        try {
+            const intensityData = hCtx.getImageData(0, 0, width, height);
+            const intensity = intensityData.data;
+            const finalImage = this.ctx.createImageData(width, height);
+            const output = finalImage.data;
+            const palette = this.colorPalette;
+
+            // Iterate pixels
+            for (let i = 0; i < intensity.length; i += 4) {
+                const val = intensity[i + 3]; // Alpha channel contains our 'heat'
+
+                if (val > 0) {
+                    // val is 0..255
+                    // Amplify heat: map 0-100 input to 0-255 spectrum
+                    let heatIdx = val * 3;
+                    if (heatIdx > 255) heatIdx = 255;
+
+                    const pIdx = Math.floor(heatIdx) * 4;
+
+                    output[i] = palette[pIdx];     // R
+                    output[i + 1] = palette[pIdx + 1]; // G
+                    output[i + 2] = palette[pIdx + 2]; // B
+
+                    // Final alpha: visible but transparent enough to see back
+                    // Scale alpha by heat so cooler areas are more transparent
+                    output[i + 3] = Math.min(255, val * 2 + 50);
+                }
+            }
+            this.ctx.putImageData(finalImage, 0, 0);
+
+        } catch (e) {
+            console.error("Heatmap render failed, falling back", e);
+            // Fallback: draw the grayscale buffer directly if mapping fails
+            this.ctx.drawImage(this.heatCanvas, 0, 0);
+        }
     }
 };
 
 document.addEventListener('DOMContentLoaded', () => {
     app.init();
-});
