@@ -3,19 +3,27 @@ const app = {
     sessionId: null,
     canvas: document.getElementById('scratch-canvas'),
     ctx: document.getElementById('scratch-canvas').getContext('2d'),
-    touches: [], // Array<{x, y, timestamp}>
+
+    // Off-screen buffer for SAFE heat caching
+    heatCanvas: document.createElement('canvas'),
+    heatCtx: null,
+
+    touches: [],
 
     // Config
+    gradient: null,
     FADE_DURATION: 10000,
     isCreator: false,
 
     init() {
+        this.heatCtx = this.heatCanvas.getContext('2d', { willReadFrequently: true });
+        this.createGradient();
+
         const urlParams = new URLSearchParams(window.location.search);
         this.sessionId = urlParams.get('session');
 
         this.setupEventListeners();
 
-        // Ensure image is loaded before sizing
         const img = document.getElementById('back-image');
         if (img.complete) {
             this.resizeCanvas();
@@ -24,10 +32,8 @@ const app = {
         }
 
         if (this.sessionId) {
-            // Check role
             this.isCreator = sessionStorage.getItem(`role_${this.sessionId}`) === 'creator';
             this.updateRoleUI();
-
             this.showSessionView();
             this.connectWebSocket();
             this.startFadeLoop();
@@ -59,6 +65,26 @@ const app = {
             if (claimBtn) claimBtn.style.display = 'block';
             if (clearBtn) clearBtn.style.display = 'none';
         }
+    },
+
+    createGradient() {
+        // Create the rainbow lookup table (256 colors)
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 1;
+        const ctx = canvas.getContext('2d');
+        const gradient = ctx.createLinearGradient(0, 0, 256, 1);
+
+        // Classic Heatmap: Blue -> Cyan -> Green -> Yellow -> Red
+        gradient.addColorStop(0.0, 'rgba(0,0,255,1)');
+        gradient.addColorStop(0.2, 'rgba(0,255,255,1)');
+        gradient.addColorStop(0.4, 'rgba(0,255,0,1)');
+        gradient.addColorStop(0.6, 'rgba(255,255,0,1)');
+        gradient.addColorStop(1.0, 'rgba(255,0,0,1)');
+
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 256, 1);
+        this.gradient = ctx.getImageData(0, 0, 256, 1).data;
     },
 
     setupEventListeners() {
@@ -183,8 +209,11 @@ const app = {
         const wrapper = document.querySelector('.canvas-wrapper');
         if (wrapper) {
             const rect = wrapper.getBoundingClientRect();
+            // Sync buffer size to display canvas
             this.canvas.width = rect.width;
             this.canvas.height = rect.height;
+            this.heatCanvas.width = rect.width;
+            this.heatCanvas.height = rect.height;
             this.renderHeatmap();
         }
     },
@@ -192,37 +221,88 @@ const app = {
     renderHeatmap() {
         const width = this.canvas.width;
         const height = this.canvas.height;
-        const ctx = this.ctx;
         const now = Date.now();
 
-        ctx.clearRect(0, 0, width, height);
-        ctx.globalCompositeOperation = 'source-over';
+        // 1. Draw Intensity Analysis on the OFF-SCREEN buffer
+        // We act like this is a grayscale image where alpha = intensity
+        const hCtx = this.heatCtx;
+        hCtx.clearRect(0, 0, width, height);
+
+        let activeTouches = 0;
 
         this.touches.forEach(touch => {
             let age = now - touch.timestamp;
             if (age < 0) age = 0;
             if (age > this.FADE_DURATION) return;
 
+            activeTouches++;
+
             const life = 1 - (age / this.FADE_DURATION);
             const x = touch.x * width;
             const y = touch.y * height;
-            const radius = 35;
+            // Slightly smaller radius for sharper heatmap feel?
+            const radius = 40;
 
-            // Simple Red Blob Logic
-            // Start at 0.8 opacity and fade to 0
-            const alpha = 0.8 * life;
+            // Draw a black circle with alpha varying by life
+            // Alpha of 0.1-0.2 stacks up quickly to 1.0
+            const alpha = 0.2 * life;
 
-            const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
-            // Center: Red
-            gradient.addColorStop(0, `rgba(255, 50, 50, ${alpha})`);
-            // Edge: Transparent
-            gradient.addColorStop(1, 'rgba(255, 50, 50, 0)');
+            const gradient = hCtx.createRadialGradient(x, y, 0, x, y, radius);
+            gradient.addColorStop(0, `rgba(0,0,0,${alpha})`);
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
 
-            ctx.fillStyle = gradient;
-            ctx.beginPath();
-            ctx.arc(x, y, radius, 0, Math.PI * 2);
-            ctx.fill();
+            hCtx.fillStyle = gradient;
+            hCtx.beginPath();
+            hCtx.arc(x, y, radius, 0, Math.PI * 2);
+            hCtx.fill();
         });
+
+        // Clear the main visible canvas
+        this.ctx.clearRect(0, 0, width, height);
+
+        if (activeTouches === 0) return;
+
+        // 2. Read intensity -> Map to Color
+        // This is safe because hCtx only has our black spots, nothing else.
+        const intensityData = hCtx.getImageData(0, 0, width, height);
+        const intensityPixels = intensityData.data; // The black pixels
+        const gradient = this.gradient; // The rainbow lookup
+
+        const outputData = this.ctx.createImageData(width, height);
+        const outputPixels = outputData.data;
+
+        // Loop through pixels
+        for (let i = 0; i < intensityPixels.length; i += 4) {
+            // Check alpha channel (3) of intensity map
+            const a = intensityPixels[i + 3];
+
+            if (a > 0) {
+                // 'a' is 0-255. Map this to our gradient index.
+                // We want higher sensitivity? 'a' is already accumulated opacity.
+                // If 3-4 spots overlap, 'a' gets close to 255.
+
+                // Map 0-255 alpha -> 0-255 gradient index
+                // Multiply map by 2 to make it "hotter" faster?
+                let gradIndex = a * 3;
+                if (gradIndex > 255) gradIndex = 255;
+
+                const gBase = Math.floor(gradIndex) * 4;
+
+                outputPixels[i] = gradient[gBase];     // R
+                outputPixels[i + 1] = gradient[gBase + 1]; // G
+                outputPixels[i + 2] = gradient[gBase + 2]; // B
+
+                // Final Alpha: 
+                // We want the heatmap to be semi-transparent so we can see the back image.
+                // But solid enough to see color.
+                // Gradient has alpha 1.0 (255).
+                // Let's create a "Ghostly" effect:
+                // Use the intensity (a) * 0.8 as the alpha?
+                outputPixels[i + 3] = Math.max(a, 160); // Min alpha 160 for visibility
+            }
+        }
+
+        this.ctx.putImageData(outputData, 0, 0);
     }
 };
 
